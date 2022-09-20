@@ -8,6 +8,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
+import java.util.stream.Collectors;
 
 public class Request {
     private String method;
@@ -21,13 +22,10 @@ public class Request {
         queries = new ArrayList<>();
     }
 
-    public Optional<NameValuePair> getQueryParam(String name) {
-        int index = queries.indexOf(name);
-        if (index > -1) {
-            return Optional.of(queries.get(index));
-        } else {
-            return Optional.empty();
-        }
+    public List<NameValuePair> getQueryParam(String name) {
+        return queries.parallelStream()
+                .filter(query -> query.getName().equals(name))
+                .collect(Collectors.toList());
     }
 
     public List<NameValuePair> getQueryParams() {
