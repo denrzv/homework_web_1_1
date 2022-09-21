@@ -1,87 +1,127 @@
 package ru.netology;
 
-import java.io.BufferedOutputStream;
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.InputStreamReader;
+import java.io.*;
 import java.net.Socket;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Map;
 
 public class ConnectionHandler implements Runnable {
     private final List<String> validPaths;
+    private final List<String> allowedMethods;
+    private final Map<String, Handler> handlers;
     private final Socket socket;
 
-    public ConnectionHandler(Socket socket, List<String> validPaths) {
-        this.validPaths = validPaths;
+
+    public ConnectionHandler(Socket socket, Server server) {
+        validPaths = server.getValidPaths();
+        allowedMethods = server.getAllowedMethods();
+        handlers = server.getHandlers();
         this.socket = socket;
     }
-
+    @SuppressWarnings("InfiniteLoopStatement")
     @Override
     public void run() {
         while (true) {
-            final String requestLine;
             try {
                 final var in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
                 final var out = new BufferedOutputStream(socket.getOutputStream());
+                Request request = readRequest(in);
 
-                requestLine = in.readLine();
-                final var parts = requestLine.split(" ");
+                System.out.println(request);
 
-                if (parts.length != 3) {
-                    continue;
+                final var handler = handlers.get(request.getMethod() + " " + request.getPath());
+                if (handler == null) {
+                    sendResponse(out, request.getPath(), !validPaths.contains(request.getPath()));
+                } else {
+                    System.out.printf("Используется кастомный Handler для пути %s и метода %s",
+                            request.getPath(), request.getMethod());
+                    handler.handle(request, out);
                 }
-
-                final var method = parts[0];
-
-                final var path = parts[1];
-                if (!validPaths.contains(path)) {
-                    out.write((
-                            "HTTP/1.1 404 Not Found\r\n" +
-                                    "Content-Length: 0\r\n" +
-                                    "Connection: close\r\n" +
-                                    "\r\n"
-                    ).getBytes());
-                    out.flush();
-                    continue;
-                }
-
-                final var filePath = Path.of(".", "public", path);
-                final var mimeType = Files.probeContentType(filePath);
-
-                if (path.equals("/classic.html")) {
-                    final var template = Files.readString(filePath);
-                    final var content = template.replace(
-                            "{time}",
-                            LocalDateTime.now().toString()
-                    ).getBytes();
-                    out.write((
-                            "HTTP/1.1 200 OK\r\n" +
-                                    "Content-Type: " + mimeType + "\r\n" +
-                                    "Content-Length: " + content.length + "\r\n" +
-                                    "Connection: close\r\n" +
-                                    "\r\n"
-                    ).getBytes());
-                    out.write(content);
-                    out.flush();
-                    continue;
-                }
-
-                final var length = Files.size(filePath);
-                out.write((
-                        "HTTP/1.1 200 OK\r\n" +
-                                "Content-Type: " + mimeType + "\r\n" +
-                                "Content-Length: " + length + "\r\n" +
-                                "Connection: close\r\n" +
-                                "\r\n"
-                ).getBytes());
-                Files.copy(filePath, out);
                 out.flush();
-            } catch (IOException e) {
-                e.printStackTrace();
+
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+        }
+    }
+
+    private Request readRequest(BufferedReader in) {
+        Request request = new Request();
+        final var body = new StringBuilder();
+        var hasBody = false;
+        try {
+            var requestLine = in.readLine();
+
+            var parts = requestLine.split(" ");
+
+            if (parts.length == 3 && allowedMethods.contains(parts[0])) {
+                request.addMethod(parts[0]);
+                if (parts[1].contains("?")) {
+                    var pathParts = parts[1].split("\\?");
+                    request.addPath(pathParts[0]);
+                    request.addQueryParams(pathParts[1]);
+                } else {
+                    request.addPath(parts[1]);
+                }
             }
+
+            while (requestLine.length() > 0) {
+                request.addHeader(requestLine);
+                if (requestLine.startsWith("Content-Length: ")) {
+                    var index = requestLine.indexOf(':') + 1;
+                    var len = requestLine.substring(index).trim();
+                    if (Integer.parseInt(len) > 0) {
+                        hasBody = true;
+                    }
+                }
+                requestLine = in.readLine();
+            }
+
+            if (hasBody) {
+                requestLine = in.readLine();
+                while (requestLine != null && requestLine.length() > 0) {
+                    body.append(requestLine);
+                    request.addBody(String.valueOf(body));
+                    requestLine = in.readLine();
+                }
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        return request;
+    }
+
+    private void sendResponse(BufferedOutputStream out, String path, boolean error) {
+        if (error) path = "/404.html";
+        try {
+            final Path filePath = Path.of(".", "public", path);
+            final String mimeType = Files.probeContentType(filePath);
+            // special case for classic
+            if (path.equals("/classic.html")) {
+                final String template = Files.readString(filePath);
+                final byte[] content = template.replace(
+                        "{time}",
+                        LocalDateTime.now().toString()
+                ).getBytes();
+                final var response = new Response("200 OK", mimeType, content.length);
+                out.write(response.toString().getBytes());
+                out.write(content);
+            } else {
+                final long length = Files.size(filePath);
+                Response response;
+                if (error) {
+                    response = new Response("404", mimeType, length);
+                } else {
+                    response = new Response("200 OK", mimeType, length);
+                }
+                out.write(response.toString().getBytes());
+                Files.copy(filePath, out);
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
         }
     }
 }
